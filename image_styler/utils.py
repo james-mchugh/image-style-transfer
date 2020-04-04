@@ -13,10 +13,6 @@ import typing
 import cv2
 import torch
 import numpy as np
-import scipy.io
-
-
-# Local application imports
 
 
 # ----------------------------------------------------------------------
@@ -33,52 +29,8 @@ class Parameters(typing.NamedTuple):
 # ----------------------------------------------------------------------
 
 
-def load_mat_model(file_name: str) -> typing.List[Parameters]:
-    """Load a MatLab model of containing network weights.
-
-    The format for the model is presumed to be the same format used in
-    the model defined here:
-
-    https://www.vlfeat.org/matconvnet/models/imagenet-vgg-verydeep-19.mat
-
-    Parameters
-    ----------
-    file_name
-        Path to file to open
-
-    Returns
-    -------
-    List of Parameters tuples containing biases and weights.
-
-    """
-    parameters_list = []
-    mat = scipy.io.loadmat(file_name)
-    for layer in mat['layers'][0]:
-
-        try:
-            has_weights = isinstance(layer[0][0][2][0][0], np.ndarray)
-        except IndexError:
-            has_weights = False
-
-        if not has_weights:
-            continue
-
-        weight_array: np.ndarray = layer[0][0][2][0][0]
-        weight_array = weight_array.reshape(weight_array.shape[-1::-1])
-        weight = torch.nn.Parameter(torch.from_numpy(weight_array),
-                                    requires_grad=True)
-
-        bias_array = layer[0][0][2][0][1].flatten()
-        bias = torch.nn.Parameter(torch.from_numpy(bias_array),
-                                  requires_grad=True)
-
-        parameters_list.append(Parameters(bias, weight))
-
-    return parameters_list
-
-
 def load_image(file_name: str, max_size: typing.Optional[int] = 0) \
-        -> torch.Tensor:
+        -> np.ndarray:
     """Load the image and prepare it to be loaded into the network.
 
     Parameters
@@ -91,18 +43,20 @@ def load_image(file_name: str, max_size: typing.Optional[int] = 0) \
 
     Returns
     -------
-    Tensor containing data of image.
+    Array containing data of image.
 
     """
     img = cv2.imread(file_name, cv2.IMREAD_COLOR)
-    img = img.astype(np.float64)
+    if img is None:
+        raise OSError(f"no image found at {file_name}")
 
+    img = img.astype(np.float64)
     if max_size > 0:
         img = reshape_image(img, max_size)
 
     img = preprocess_image(img)
 
-    return torch.from_numpy(img)
+    return img
 
 
 def reshape_image(img: np.ndarray, max_size: int) -> np.ndarray:
@@ -123,13 +77,13 @@ def reshape_image(img: np.ndarray, max_size: int) -> np.ndarray:
     height, width, _ = img.shape
     ratio = height / width
 
-    base = max(height, width)
-    needs_reshape = base > max_size
+    long_side = max(height, width)
+    needs_reshape = long_side > max_size
 
     if needs_reshape:
-        new_height = int(max_size if height == base else max_size * ratio)
-        new_width = int(max_size if width == base else max_size / ratio)
-        img = cv2.resize(img, dsize=(new_height, new_width),
+        new_height = int(max_size if height == long_side else max_size * ratio)
+        new_width = int(max_size if width == long_side else max_size / ratio)
+        img = cv2.resize(img, dsize=(new_width, new_height),
                          interpolation=cv2.INTER_AREA)
 
     return img
@@ -154,3 +108,19 @@ def preprocess_image(img: np.ndarray) -> np.ndarray:
     img = img.reshape(1, *img.shape[::-1])  # Add extra dimension
 
     return img
+
+
+def save_image(img: np.ndarray, file: str):
+    """Save the tensor as an image.
+
+    Parameters
+    ----------
+    img
+        Array to save as image.
+    file
+        File to save tensor to.
+
+    """
+    img = img.reshape(img.shape[-1:0:-1])
+    img = np.flip(img, axis=2).copy()
+    cv2.imwrite(file, img)

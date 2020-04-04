@@ -1,4 +1,4 @@
-"""Models for the image styler.
+"""Insert docs here...
 
 """
 
@@ -7,143 +7,135 @@
 # ----------------------------------------------------------------------
 
 # System level imports
+import typing
 
 # Third party imports
 import torch
-
-# Local application imports
-from . import utils
-
-# ----------------------------------------------------------------------
-# globals
-# ----------------------------------------------------------------------
-import typing
-
-CONV_STRIDE = (1, 1)
-CONV_KERNEL_SIZE = (3, 3)
-CONV_PADDING = (1, 1)
-
-POOL_STRIDE = (2, 2)
-POOL_KERNEL_SIZE = (2, 2)
+import torchvision
+from torch.hub import load_state_dict_from_url
 
 
 # ----------------------------------------------------------------------
 # class
 # ----------------------------------------------------------------------
 
-class VGG19(torch.nn.Module):
-    """Class for the VGG19 model for image classification.
+SIZE_TO_CFG_MAP = {
+    11: torchvision.models.vgg.cfgs['A'],
+    13: torchvision.models.vgg.cfgs['B'],
+    16: torchvision.models.vgg.cfgs['D'],
+    19: torchvision.models.vgg.cfgs['E']
+}
+
+
+# ----------------------------------------------------------------------
+# class
+# ----------------------------------------------------------------------
+
+class VGG(torchvision.models.VGG):
+    """Extending the torchvision model to add visibility.
 
     """
+    def __init__(self, features: torch.nn.Sequential, num_classes: int = 1000,
+                 init_weights: bool = True):
+        super().__init__(features, num_classes, init_weights)
 
-    def __init__(self):
-        super().__init__()
-        self.conv_01 = self.ConvReLU(3, 64)
-        self.conv_02 = self.ConvReLU(64, 64)
-        self.pool_01 = torch.nn.MaxPool2d(POOL_KERNEL_SIZE, POOL_STRIDE)
+    @typing.overload
+    def forward(self, x: torch.Tensor,
+                watch_layers: bool = False) -> torch.Tensor:
+        ...
 
-        self.conv_03 = self.ConvReLU(64, 128)
-        self.conv_04 = self.ConvReLU(128, 128)
-        self.pool_02 = torch.nn.MaxPool2d(POOL_KERNEL_SIZE, POOL_STRIDE)
+    def forward(self, x: torch.Tensor,
+                watch_layers: typing.Optional[bool] = False) \
+            -> typing.Tuple[torch.Tensor, typing.Dict[str, torch.Tensor]]:
+        """Save the output of ReLU layers to cache and forward propagate
 
-        self.conv_05 = self.ConvReLU(128, 256)
-        self.conv_06 = self.ConvReLU(256, 256)
-        self.conv_07 = self.ConvReLU(256, 256)
-        self.conv_08 = self.ConvReLU(256, 256)
-        self.pool_03 = torch.nn.MaxPool2d(POOL_KERNEL_SIZE, POOL_STRIDE)
+        For each ReLU layer that the input tensor is forwarded for, save
+        the results. This is done to provide visibility into the model
+        when computing loss functions to perform style transfers. Only,
+        the output of ReLU layers are saved because ReLU layers follow
+        Conv2D layers in VGG, and we are interested in the activated
+        feature maps when calculating the style transfer losses.
 
-        self.conv_09 = self.ConvReLU(256, 512)
-        self.conv_10 = self.ConvReLU(512, 512)
-        self.conv_11 = self.ConvReLU(512, 512)
-        self.conv_12 = self.ConvReLU(512, 512)
-        self.pool_04 = torch.nn.MaxPool2d(POOL_KERNEL_SIZE, POOL_STRIDE)
+        Notes
+        -----
+        The naming convention for the layers follows the convention of
+        the original publication:
 
-        self.conv_13 = self.ConvReLU(512, 512)
-        self.conv_14 = self.ConvReLU(512, 512)
-        self.conv_15 = self.ConvReLU(512, 512)
-        self.conv_16 = self.ConvReLU(512, 512)
-        self.pool_05 = torch.nn.MaxPool2d(POOL_KERNEL_SIZE, POOL_STRIDE)
+        `"Very Deep Convolutional Networks For Large-Scale Image
+        Recognition"
+        <https://arxiv.org/pdf/1409.1556.pdf>`_
 
-        # noinspection PyUnresolvedReferences
-        self.flatten = torch.nn.Flatten()
-        self.dense_01 = torch.nn.Linear(512 * 7 * 7, 4096)
-        self.act_01 = torch.nn.ReLU()
-        self.dense_02 = torch.nn.Linear(4096, 4096)
-        self.act_02 = torch.nn.ReLU()
-        self.dense_03 = torch.nn.Linear(4096, 1000)
-        self.act_03 = torch.nn.Softmax(dim=1000)
-
-    def forward(self, x) -> torch.Tensor:
-        out = torch.Tensor()
-        for module in self.children():
-            out = module(out if len(out) > 0 else x)
-
-        return out
-
-    @property
-    def weighted_modules(self) -> typing.Iterator[torch.nn.Module]:
-        """Get the weighted modules of the class.
-
-        Returns
-        -------
-        An iterator of weighted modules.
-
-        """
-        return filter(lambda mod: hasattr(mod, "weight"), self.modules())
-
-    def set_layer_parameters(self,
-                             parameters: typing.Iterator[utils.Parameters]):
-        """Set the weights of the network.
+        The nameing convention is "conv{group_no}_{layer_no}
 
         Parameters
         ----------
-        parameters
-            Weights to set for the layers
+        x
+            Input image to classify.
+        watch_layers
+            If True, also return a dictionary of outputs from the
+            activated feature maps (the default is False)
+
+        Returns
+        -------
+        Tensor containing output results and layer outputs if enabled.
 
         """
-        for module, parameters in zip(self.weighted_modules, parameters):
-            module.register_parameter('weight',
-                                      torch.nn.Parameter(
-                                          parameters.weight.reshape(
-                                              module.weight.shape), True))
-            module.register_parameter('bias',
-                                      torch.nn.Parameter(
-                                          parameters.bias.reshape(
-                                              module.bias.shape), False))
+        group_no, layer_no = 1, 1
+        layer_output_map: typing.Dict[str, torch.Tensor] = {}
+        for module in self.features.children():
+            x = module(x)
+            if isinstance(module, torch.nn.ReLU):
+                layer_output_map[f"conv{group_no}_{layer_no}"] = x
+                layer_no += 1
+            elif isinstance(module, torch.nn.MaxPool2d):
+                group_no += 1
+                layer_no = 1
 
-    class ConvReLU(torch.nn.Module):
-        """Convolution layer with ReLU.
-        
-        The stride, padding, and kernel are static as defined in VGG-19
-        
-        """
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.classifier(x)
 
-        def __init__(self, in_channels: int, out_channels: int,
-                     weights: typing.Optional[torch.nn.Parameter] = None):
-            """Create a convolution layer with ReLU activation
+        if watch_layers:
+            return x, layer_output_map
 
-            Parameters
-            ----------
-            in_channels
-                Number of channels coming into the layer.
-            out_channels
-                Number of channels coming out of the layer.
-            weights
-                Weights to initialize the layer with.
-    
-            Returns
-            -------
-            Convolution Module with proper channels and ReLU activation.
-    
-            """
-            super().__init__()
-            self.conv = torch.nn.Conv2d(in_channels, out_channels,
-                                        CONV_KERNEL_SIZE, CONV_STRIDE,
-                                        CONV_PADDING)
-            self.activation = torch.nn.ReLU()
+        return x
 
-            if weights:
-                self.conv.register_parameter("weight", weights)
 
-        def forward(self, x):
-            return self.activation(self.conv(x))
+def vgg(size: int, batch_norm: typing.Optional[bool] = False,
+        pretrained: typing.Optional[bool] = True,
+        **kwargs):
+    """Construct the model based on the  given config.
+
+    Based on the function to create models from torchvision.
+
+    Parameters
+    ----------
+    size
+        Size of network, options are 11, 13, 16, and 19.
+    batch_norm
+        Whether batch normalization layers should be used.
+    pretrained
+        If True, pretrained weights are loaded into the model
+
+    Returns
+    -------
+    VGG model based on provided architecture.
+
+    """
+    if size not in {11, 13, 16, 19}:
+        raise TypeError("value for size is invalid")
+
+    arch_str = f"vgg{size}" + "_bn" * batch_norm
+
+    if pretrained:
+        kwargs["init_weights"] = False
+    feats = torchvision.models.vgg.make_layers(SIZE_TO_CFG_MAP[size],
+                                               batch_norm=batch_norm)
+    model = VGG(feats, **kwargs)
+
+    if pretrained:
+        model_url = torchvision.models.vgg.model_urls[arch_str]
+        state_dict = load_state_dict_from_url(model_url)
+        model.load_state_dict(state_dict)
+
+    return model

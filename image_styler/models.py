@@ -12,11 +12,12 @@ import typing
 # Third party imports
 import torch
 import torchvision
-from torch.hub import load_state_dict_from_url
 
+# Local application imports
+from . import loss, constants
 
 # ----------------------------------------------------------------------
-# class
+# globals
 # ----------------------------------------------------------------------
 
 SIZE_TO_CFG_MAP = {
@@ -26,35 +27,46 @@ SIZE_TO_CFG_MAP = {
     19: torchvision.models.vgg.cfgs['E']
 }
 
+CNN_NORMALIZATION_MEAN = torch.tensor([0.485, 0.456, 0.406])
+CNN_NORMALIZATION_STD = torch.tensor([0.229, 0.224, 0.225])
+
 
 # ----------------------------------------------------------------------
 # class
 # ----------------------------------------------------------------------
 
-class VGG(torchvision.models.VGG):
-    """Extending the torchvision model to add visibility.
+class StyleVGG(torch.nn.Module):
+    """Extending the torchvision VGG model to add visibility.
 
     """
-    def __init__(self, features: torch.nn.Sequential, num_classes: int = 1000,
-                 init_weights: bool = True):
-        super().__init__(features, num_classes, init_weights)
 
-    @typing.overload
-    def forward(self, x: torch.Tensor,
-                watch_layers: bool = False) -> torch.Tensor:
-        ...
+    def __init__(self, base_cnn: torch.nn.Module, content: torch.Tensor, style: torch.Tensor,
+                 content_layers: typing.List[str], style_layers: typing.List[str],
+                 device: torch.device,
+                 pool_type: constants.PoolType = constants.DEFAULT_POOL_TYPE):
+        super().__init__()
+        normalizer = Normalizer(CNN_NORMALIZATION_MEAN.to(device),
+                                CNN_NORMALIZATION_STD.to(device))
+        self.features = torch.nn.Sequential(normalizer)
+        self.content_layers = set(content_layers)
+        self.style_layers = set(style_layers)
+        self.content_losses = []
+        self.style_losses = []
+        self.build(base_cnn, content, style, pool_type)
+        self.to(device)
+        self.eval()
 
-    def forward(self, x: torch.Tensor,
-                watch_layers: typing.Optional[bool] = False) \
-            -> typing.Tuple[torch.Tensor, typing.Dict[str, torch.Tensor]]:
-        """Save the output of ReLU layers to cache and forward propagate
+    def build(self, base_cnn: torchvision.models.VGG,
+              content: torch.Tensor, style: torch.Tensor,
+              pool_type: constants.PoolType):
+        """Build a model with feature generation from the provided model
 
-        For each ReLU layer that the input tensor is forwarded for, save
-        the results. This is done to provide visibility into the model
-        when computing loss functions to perform style transfers. Only,
-        the output of ReLU layers are saved because ReLU layers follow
-        Conv2D layers in VGG, and we are interested in the activated
-        feature maps when calculating the style transfer losses.
+        Given a VGG model from torchvision, rebuild a model with the
+        original model's features while adding in layers to calculate
+        the content and style losses. The pool type can also be swapped
+        out. In the traditional VGG model, max pooling is used, but here
+        average pooling is used as it appears to give better results.
+
 
         Notes
         -----
@@ -65,77 +77,77 @@ class VGG(torchvision.models.VGG):
         Recognition"
         <https://arxiv.org/pdf/1409.1556.pdf>`_
 
-        The nameing convention is "conv{group_no}_{layer_no}
+        The naming convention is "conv{group_no}_{layer_no}
+
+        """
+        group_num, relu_num, conv_num = 1, 1, 1
+        for layer in base_cnn.features.children():
+            if isinstance(layer, torch.nn.Conv2d):
+                name = f"conv{group_num}_{conv_num}"
+                conv_num += 1
+
+            elif isinstance(layer, torch.nn.ReLU):
+                name = f"relu{group_num}_{relu_num}"
+                layer = torch.nn.ReLU(inplace=False)
+                relu_num += 1
+
+            elif isinstance(layer, torch.nn.MaxPool2d):
+                name = f"max{group_num}"
+                if pool_type == constants.PoolType.AVG:
+                    layer = torch.nn.AvgPool2d(layer.kernel_size, layer.stride, layer.padding)
+                else:
+                    layer = torch.nn.MaxPool2d(layer.kernel_size, layer.stride, layer.padding)
+                group_num += 1
+                conv_num, relu_num = 1, 1
+
+            else:
+                raise TypeError("Invalid layer type received.")
+
+            self.features.add_module(name, layer)
+
+            if name in self.content_layers:
+                name = f"content_loss{len(self.content_losses)}"
+                content_repr = self.features(content).detach()
+                content_loss = loss.ContentLoss(content_repr)
+                self.content_losses.append(content_loss)
+                self.features.add_module(name, content_loss)
+
+            if name in self.style_layers:
+                name = f"style_loss{len(self.style_losses)}"
+                style_repr = self.features(style).detach()
+                style_loss = loss.StyleLoss(style_repr)
+                self.style_losses.append(style_loss)
+                self.features.add_module(name, style_loss)
+
+            if (len(self.style_layers) == len(self.style_losses)
+                    and len(self.content_layers) == len(self.content_losses)):
+                # we have all the layers we need, let's wrap it up
+                break
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward the input through and generate its representation.
 
         Parameters
         ----------
         x
-            Input image to classify.
-        watch_layers
-            If True, also return a dictionary of outputs from the
-            activated feature maps (the default is False)
+            Input image to generate representations of.
 
         Returns
         -------
-        Tensor containing output results and layer outputs if enabled.
+        Tensor containing representation of input.
 
         """
-        group_no, layer_no = 1, 1
-        layer_output_map: typing.Dict[str, torch.Tensor] = {}
-        for module in self.features.children():
-            x = module(x)
-            if isinstance(module, torch.nn.ReLU):
-                layer_output_map[f"conv{group_no}_{layer_no}"] = x
-                layer_no += 1
-            elif isinstance(module, torch.nn.MaxPool2d):
-                group_no += 1
-                layer_no = 1
-
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1)
-        x = self.classifier(x)
-
-        if watch_layers:
-            return x, layer_output_map
+        x = self.features.forward(x)
 
         return x
 
 
-def vgg(size: int, batch_norm: typing.Optional[bool] = False,
-        pretrained: typing.Optional[bool] = True,
-        **kwargs):
-    """Construct the model based on the  given config.
+class Normalizer(torch.nn.Module):
+    def __init__(self, mean: torch.Tensor, std: torch.Tensor):
+        super(Normalizer, self).__init__()
+        self.mean = mean.view(-1, 1, 1)
+        self.std = std.view(-1, 1, 1)
 
-    Based on the function to create models from torchvision.
-
-    Parameters
-    ----------
-    size
-        Size of network, options are 11, 13, 16, and 19.
-    batch_norm
-        Whether batch normalization layers should be used.
-    pretrained
-        If True, pretrained weights are loaded into the model
-
-    Returns
-    -------
-    VGG model based on provided architecture.
-
-    """
-    if size not in {11, 13, 16, 19}:
-        raise TypeError("value for size is invalid")
-
-    arch_str = f"vgg{size}" + "_bn" * batch_norm
-
-    if pretrained:
-        kwargs["init_weights"] = False
-    feats = torchvision.models.vgg.make_layers(SIZE_TO_CFG_MAP[size],
-                                               batch_norm=batch_norm)
-    model = VGG(feats, **kwargs)
-
-    if pretrained:
-        model_url = torchvision.models.vgg.model_urls[arch_str]
-        state_dict = load_state_dict_from_url(model_url)
-        model.load_state_dict(state_dict)
-
-    return model
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        norm = (x - self.mean) / self.std
+        return norm

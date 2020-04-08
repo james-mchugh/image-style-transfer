@@ -1,4 +1,4 @@
-"""Insert docs here...
+"""PyTorch models used to perform style transfer
 
 """
 
@@ -40,10 +40,35 @@ class StyleVGG(torch.nn.Module):
 
     """
 
-    def __init__(self, base_cnn: torch.nn.Module, content: torch.Tensor, style: torch.Tensor,
+    def __init__(self, vgg: torch.nn.Module, content: torch.Tensor, style: torch.Tensor,
                  content_layers: typing.List[str], style_layers: typing.List[str],
                  device: torch.device,
                  pool_type: constants.PoolType = constants.DEFAULT_POOL_TYPE):
+        """Initialze the StyleVGG model and build it.
+
+        Parameters
+        ----------
+        vgg
+            Base model to construct style transfer model. In theory,
+            this could be any CNN, but it is currently configured to
+            expect torchvision VGG models with a Sequential Module
+            stored in vgg.features
+        content
+            Content image to create representations of for loss
+            functions
+        style
+            Style image to create representations of for loss functions
+        content_layers
+            Layers to use for content representations when computing
+            content loss.
+        style_layers
+            Layers to use for style representations when computing
+            style loss.
+        device
+            Device to use for computation.
+        pool_type
+            Type of pooling layers, either max or average.
+        """
         super().__init__()
         normalizer = Normalizer(CNN_NORMALIZATION_MEAN.to(device),
                                 CNN_NORMALIZATION_STD.to(device))
@@ -52,11 +77,11 @@ class StyleVGG(torch.nn.Module):
         self.style_layers = set(style_layers)
         self.content_losses = []
         self.style_losses = []
-        self.build(base_cnn, content, style, pool_type)
+        self.build(vgg, content, style, pool_type)
         self.to(device)
         self.eval()
 
-    def build(self, base_cnn: torchvision.models.VGG,
+    def build(self, vgg: torchvision.models.VGG,
               content: torch.Tensor, style: torch.Tensor,
               pool_type: constants.PoolType):
         """Build a model with feature generation from the provided model
@@ -67,6 +92,20 @@ class StyleVGG(torch.nn.Module):
         out. In the traditional VGG model, max pooling is used, but here
         average pooling is used as it appears to give better results.
 
+        Parameters
+        ----------
+        vgg
+            Base model to construct style transfer model. In theory,
+            this could be any CNN, but it is currently configured to
+            expect torchvision VGG models with a Sequential Module
+            stored in vgg.features
+        content
+            Content image to create representations of for loss
+            functions
+        style
+            Style image to create representations of for loss functions
+        pool_type
+            Type of pooling layers, either max or average.
 
         Notes
         -----
@@ -81,7 +120,7 @@ class StyleVGG(torch.nn.Module):
 
         """
         group_num, relu_num, conv_num = 1, 1, 1
-        for layer in base_cnn.features.children():
+        for layer in vgg.features.children():
             if isinstance(layer, torch.nn.Conv2d):
                 name = f"conv{group_num}_{conv_num}"
                 conv_num += 1

@@ -1,4 +1,4 @@
-"""Insert docs here...
+"""Useful utils for interacting with images.
 
 """
 

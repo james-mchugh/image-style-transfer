@@ -12,7 +12,6 @@ setup(
     name='image-style-transfer',
     version='0.1.0',
     packages=find_packages(),
-    package_dir={'': 'image_styler'},
     url='https://github.com/james-mchugh/image-style-transfer',
     license='',
     author='jmchugh',

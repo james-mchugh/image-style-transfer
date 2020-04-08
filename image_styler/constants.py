@@ -1,4 +1,4 @@
-"""Insert docs here...
+"""Defaults and constants used throughout the package.
 
 """
 

@@ -21,7 +21,7 @@ from . import constants, models
 
 
 # ----------------------------------------------------------------------
-# globals
+# models
 # ----------------------------------------------------------------------
 
 class Stylizer(object):
@@ -48,6 +48,26 @@ class Stylizer(object):
                  style_layers: typing.List[str] = constants.DEFAULT_STYLE_LAYERS,
                  pool_type: constants.PoolType = constants.DEFAULT_POOL_TYPE,
                  device: torch.device = torch.device("cpu")):
+        """Initialize the Stylizer and the StyleVGG model.
+
+        Parameters
+        ----------
+        content
+            Content image to create representations of for loss
+            functions
+        style
+            Style image to create representations of for loss functions
+        content_layers
+            Layers to use for content representations when computing
+            content loss.
+        style_layers
+            Layers to use for style representations when computing
+            style loss.
+        device
+            Device to use for computation.
+        pool_type
+            Type of pooling layers, either max or average.
+        """
         self.content = content.to(device)
         self.style = style.to(device)
         self.content_layers = content_layers
@@ -107,7 +127,7 @@ class Stylizer(object):
 
         optimizer = LBFGS((generated,), max_iter=max_iter, lr=learning_rate)
 
-        closure = functools.partial(self.optim_iteration, generated,optimizer,
+        closure = functools.partial(self.optim_iteration, generated, optimizer,
                                     content_weight, style_weight,
                                     content_layer_weights, style_layer_weights)
         optimizer.step(closure)

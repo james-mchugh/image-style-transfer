@@ -20,7 +20,6 @@ from . import utils, stylize, constants
 # main
 # ----------------------------------------------------------------------
 
-
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
